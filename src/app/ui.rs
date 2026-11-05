@@ -16,7 +16,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use maestro::service::settings::AncState;
 
 use crate::bt::{self, StreamEvent};
-use crate::menubar::UiCommand;
+
+use super::worker::UiCommand;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Batt {
