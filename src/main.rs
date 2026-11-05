@@ -251,12 +251,18 @@ async fn set_anc(rx: UnboundedReceiver<StreamEvent>, state: AncState) -> Result<
         .write_setting(SettingValue::CurrentAncrState(state))
         .await;
     if let Err(e) = res {
-        let hint = if format!("{e}").contains("FailedPrecondition") {
-            " (hint: the buds usually reject noise-control changes unless they are in your ears)"
-        } else {
-            ""
-        };
-        bail!("{e}{hint}");
+        match e.code() {
+            maestro::pwrpc::Status::Unknown => bail!(
+                "the buds rejected '{}' — this mode is not supported on this model \
+                 (Pixel Buds 2a have no Adaptive mode; that is Pro-only)",
+                state.as_str()
+            ),
+            maestro::pwrpc::Status::FailedPrecondition => bail!(
+                "{e} (hint: the buds usually reject noise-control changes \
+                 unless they are in your ears)"
+            ),
+            _ => bail!(e),
+        }
     }
 
     // Confirm what the buds report back.

@@ -22,7 +22,9 @@ Pair and connect the buds in macOS Bluetooth settings first. The buds reject
 noise-control changes (`FailedPrecondition`) unless they detect that they are
 in your ears, and they report an undefined noise mode (raw 0) while unworn.
 Case battery is only reported while at least one bud sits in the case (the
-case has no Bluetooth radio of its own).
+case has no Bluetooth radio of its own). The Pixel Buds 2a have no Adaptive
+mode — requesting it is rejected by the buds (`Unknown` status), same as on
+the original Linux app.
 
 Set `RUST_LOG=budlink_mac=debug` for verbose logs.
 
