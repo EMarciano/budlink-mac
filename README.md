@@ -12,11 +12,18 @@ the BlueZ RFCOMM transport with macOS's IOBluetooth framework.
 ## Usage
 
 ```
+cargo run -- menubar      # menu bar app: battery icon + noise control menu
 cargo run -- list         # list paired Bluetooth devices
 cargo run -- probe        # dump the buds' SDP services (finds the Maestro channel)
 cargo run -- status       # battery levels, placement, and noise control mode
 cargo run -- anc <mode>   # set noise control: off | active | aware | adaptive
 ```
+
+The menu bar app shows an earbuds icon with per-bud battery levels, a battery
+breakdown, and a checkmarked noise-control menu (Off / ANC / Transparency /
+Adaptive). It follows changes made on the buds themselves (touch-and-hold),
+greys out modes the buds reject, and reconnects automatically — retrying every
+10 s and whenever you click *Reconnect* — when the buds leave and return.
 
 Pair and connect the buds in macOS Bluetooth settings first. The buds reject
 noise-control changes (`FailedPrecondition`) unless they detect that they are
@@ -62,7 +69,11 @@ Set `RUST_LOG=budlink_mac=debug` for verbose logs.
   through `writeSync` chunked to the channel MTU.
 - **Threading**: all IOBluetooth calls happen on the **main thread**, which
   then pumps its `NSRunLoop` forever (delegate callbacks are delivered there).
-  The tokio runtime runs on a worker thread. Two pitfalls this avoids:
+  The tokio runtime runs on a worker thread. In the menu bar app the main
+  thread runs AppKit instead (`NSApplication.run()` pumps the same main
+  runloop), and the worker reaches the UI via a shared state snapshot plus
+  `performSelectorOnMainThread`; UI commands (mode changes, reconnect) travel
+  back over a tokio channel. Two pitfalls this avoids:
   - IOBluetooth's XPC handshake with `bluetoothd` can deadlock if first used
     from a background thread while the main thread is blocked.
   - `-[NSRunLoop run]` on a bare thread returns immediately when no sources
@@ -83,9 +94,10 @@ libmaestro's protobuf codegen.
 - [x] Device discovery, SDP probe, RFCOMM open
 - [x] Battery levels (buds + case), placement info
 - [x] Noise control read/write (off / ANC / transparency / adaptive)
-- [ ] Follow device-side changes (touch-and-hold) via settings subscription
-- [ ] Menu bar app (battery icon + noise control), like budlink's tray
-- [ ] Reconnect handling when the buds come and go
+- [x] Menu bar app (battery icon + noise control), like budlink's tray
+- [x] Follow device-side changes (touch-and-hold) via settings subscription
+- [x] Reconnect handling when the buds come and go
+- [ ] App bundle + codesigning (proper app name/icon, launch at login)
 
 ## License
 

@@ -7,7 +7,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -157,11 +157,9 @@ unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
         .ok_or_else(|| anyhow!("no paired Pixel Buds found"))?;
 
     if !unsafe { dev.isConnected() } {
-        tracing::info!("buds not connected, opening baseband connection");
-        let ret = unsafe { dev.openConnection() };
-        if ret != 0 {
-            bail!("failed to connect to buds (IOReturn {ret})");
-        }
+        // openRFCOMMChannelAsync opens the baseband connection itself;
+        // note in the log for diagnostics only.
+        tracing::info!("buds not currently connected; channel open will establish the link");
     }
     Ok(dev)
 }
@@ -210,7 +208,8 @@ unsafe fn record_is_maestro(rec: &IOBluetoothSDPServiceRecord) -> bool {
 unsafe fn find_maestro_channel(dev: &IOBluetoothDevice) -> Result<BluetoothRFCOMMChannelID> {
     let ret = unsafe { dev.performSDPQuery(None) };
     if ret != 0 {
-        bail!("SDP query failed (IOReturn {ret})");
+        // Cached records are fine — the channel id rarely changes.
+        tracing::debug!(ret, "SDP query failed, falling back to cached records");
     }
 
     let Some(services) = (unsafe { dev.services() }) else {
@@ -375,13 +374,14 @@ impl AsyncWrite for RfcommStream {
     }
 }
 
-/// Open the Maestro RFCOMM channel to the buds, then pump the main runloop
-/// forever. Must be called on the MAIN thread: IOBluetooth's first use and
-/// its XPC handshake with bluetoothd are not safe when the main thread is
-/// blocked elsewhere. Events are delivered through `tx`.
-pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
-    let setup = autoreleasepool(|_| unsafe {
-        (|| -> Result<(usize, usize)> {
+/// Open the Maestro RFCOMM channel to the buds. Must be called on the MAIN
+/// thread with a running runloop: IOBluetooth's first use and its XPC
+/// handshake with bluetoothd are not safe when the main thread is blocked
+/// elsewhere. All outcomes (success and failure) are reported as StreamEvents
+/// through `tx`.
+pub fn open_maestro_channel(tx: &UnboundedSender<StreamEvent>) {
+    let res = autoreleasepool(|_| unsafe {
+        (|| -> Result<()> {
             tracing::debug!("finding buds");
             let dev = find_buds()?;
             tracing::debug!("sdp query");
@@ -412,13 +412,19 @@ pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
             if ret != 0 {
                 bail!("openRFCOMMChannelAsync failed (IOReturn {ret})");
             }
-            Ok((raw, mtu))
+            Ok(())
         })()
     });
 
-    if let Err(e) = setup {
+    if let Err(e) = res {
         let _ = tx.send(StreamEvent::Error(format!("{e:#}")));
     }
+}
+
+/// Open the Maestro RFCOMM channel, then pump the main runloop forever
+/// (used by the CLI commands, which have no AppKit runloop).
+pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
+    open_maestro_channel(&tx);
 
     // `-[NSRunLoop run]` on a thread without sources yet returns immediately,
     // so pump the runloop manually.
@@ -429,4 +435,39 @@ pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
             run_loop.runMode_beforeDate(unsafe { objc2_foundation::NSDefaultRunLoopMode }, &until);
         });
     }
+}
+
+/// Waits for the channel open events and builds the stream.
+pub async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<RfcommStream> {
+    let open = async {
+        let (raw, mtu) = loop {
+            match rx.recv().await {
+                Some(StreamEvent::OpenResult(0, raw, mtu)) => break (raw, mtu),
+                Some(StreamEvent::OpenResult(ret, _, _)) => {
+                    bail!("openRFCOMMChannelAsync failed (IOReturn {ret})")
+                }
+                Some(StreamEvent::Error(e)) => bail!(e),
+                Some(_) => continue,
+                None => bail!("bluetooth main loop died before opening"),
+            }
+        };
+        loop {
+            match rx.recv().await {
+                Some(StreamEvent::OpenComplete(0)) => break,
+                Some(StreamEvent::OpenComplete(status)) => {
+                    bail!("RFCOMM channel open failed (IOReturn {status})")
+                }
+                Some(StreamEvent::Error(e)) => bail!(e),
+                Some(_) => continue,
+                None => bail!("bluetooth main loop died before open completed"),
+            }
+        }
+        Ok(RfcommStream::new(rx, raw, mtu))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), open)
+        .await
+        .context(
+            "timed out opening RFCOMM channel (the buds accept a single control connection: \
+             close the Pixel Buds app on your phone, and check for a stale budlink-mac process)",
+        )?
 }

@@ -1,13 +1,18 @@
 mod bt;
+mod menubar;
+mod ui;
 
 use std::future::Future;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{bail, Result};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
+
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
 use maestro::protocol::codec::Codec;
 use maestro::protocol::types::RuntimeInfo;
@@ -17,7 +22,7 @@ use maestro::pwrpc::Error as RpcError;
 use maestro::service::settings::{AncState, SettingId, SettingValue};
 use maestro::service::MaestroService;
 
-use bt::{RfcommStream, StreamEvent};
+use bt::StreamEvent;
 
 const USAGE: &str = "budlink-mac — control Google Pixel Buds from macOS
 
@@ -27,6 +32,7 @@ usage:
   budlink-mac status       show battery levels and current noise control mode
   budlink-mac anc <mode>   set noise control: off | active | aware | adaptive
   budlink-mac settings     dump firmware info and ANC-related settings (diagnostic)
+  budlink-mac menubar      run the menu bar app (battery icon + noise control)
 ";
 
 fn main() -> ExitCode {
@@ -45,6 +51,7 @@ fn main() -> ExitCode {
         "status" => run_cmd(status),
         "settings" => run_cmd(settings_dump),
         "x-gesture-adaptive" => run_cmd(gesture_adaptive_experiment),
+        "menubar" => menubar_main(),
         "anc" => {
             let Some(mode) = std::env::args().nth(2) else {
                 eprint!("{USAGE}");
@@ -116,38 +123,38 @@ where
 }
 
 /// Waits for the channel open events and builds the stream.
-async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<RfcommStream> {
-    let open = async {
-        let (raw, mtu) = loop {
-            match rx.recv().await {
-                Some(StreamEvent::OpenResult(0, raw, mtu)) => break (raw, mtu),
-                Some(StreamEvent::OpenResult(ret, _, _)) => {
-                    bail!("openRFCOMMChannelAsync failed (IOReturn {ret})")
-                }
-                Some(StreamEvent::Error(e)) => bail!(e),
-                Some(_) => continue,
-                None => bail!("bluetooth main loop died before opening"),
-            }
-        };
-        loop {
-            match rx.recv().await {
-                Some(StreamEvent::OpenComplete(0)) => break,
-                Some(StreamEvent::OpenComplete(status)) => {
-                    bail!("RFCOMM channel open failed (IOReturn {status})")
-                }
-                Some(StreamEvent::Error(e)) => bail!(e),
-                Some(_) => continue,
-                None => bail!("bluetooth main loop died before open completed"),
-            }
-        }
-        Ok(RfcommStream::new(rx, raw, mtu))
-    };
-    tokio::time::timeout(Duration::from_secs(30), open)
-        .await
-        .context(
-            "timed out opening RFCOMM channel (the buds accept a single control connection: \
-             close the Pixel Buds app on your phone, and check for a stale budlink-mac process)",
-        )?
+async fn wait_for_open(rx: UnboundedReceiver<StreamEvent>) -> Result<bt::RfcommStream> {
+    bt::wait_for_open(rx).await
+}
+
+/// Menu bar app: AppKit on the main thread, tokio worker for the protocol.
+fn menubar_main() -> ExitCode {
+    let mtm = MainThreadMarker::new().expect("must run on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+
+    let state = Arc::new(Mutex::new(ui::UiState::default()));
+    let open_slot = Arc::new(Mutex::new(None));
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<menubar::UiCommand>();
+
+    let controller = ui::UiController::new(mtm, cmd_tx, state.clone(), open_slot.clone());
+    let handle = ui::UiHandle::new(&controller, state, open_slot);
+    std::mem::forget(controller); // lives for the app's lifetime
+
+    std::thread::Builder::new()
+        .name("tokio".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime");
+            rt.block_on(menubar::worker(cmd_rx, handle));
+        })
+        .expect("failed to spawn tokio thread");
+
+    app.run();
+    ExitCode::SUCCESS
 }
 
 /// Opens the Maestro connection and starts the RPC client.
@@ -291,8 +298,6 @@ async fn settings_dump(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
 /// restore the original configuration. Determines whether the 2a firmware
 /// gates Adaptive mode at the setting level or only at the state level.
 async fn gesture_adaptive_experiment(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
-    use maestro::service::settings::AncrGestureLoop;
-
     let (handle, channel, client_task) = setup_client(rx).await?;
     let mut service = MaestroService::new(handle, channel);
 
