@@ -1,4 +1,4 @@
-//! Menu bar worker: owns the Maestro connection lifecycle on a tokio runtime,
+//! Connection worker: owns the Maestro session lifecycle on a tokio runtime,
 //! mirroring budlink's device.rs session/serve structure.
 
 use std::time::Duration;
@@ -15,7 +15,8 @@ use maestro::service::settings::{id, AncState, SettingValue};
 use maestro::service::MaestroService;
 
 use crate::bt::{self, StreamEvent};
-use crate::ui::{Batt, UiHandle};
+
+use super::ui::{Batt, UiHandle, UiState};
 
 pub enum UiCommand {
     SetAnc(AncState),
@@ -165,7 +166,7 @@ fn setting_from(rsp: SettingsRsp) -> Option<SettingValue> {
     Some(value.value_oneof?.into())
 }
 
-fn battery_from(info: &RuntimeInfo, state: &mut crate::ui::UiState) {
+fn battery_from(info: &RuntimeInfo, state: &mut UiState) {
     let conv = |b: &maestro::protocol::types::DeviceBatteryInfo| Batt {
         level: b.level.clamp(0, 100) as u8,
         charging: b.state == 2,
