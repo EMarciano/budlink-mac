@@ -1,11 +1,12 @@
 //! macOS IOBluetooth bridge: finds the Pixel Buds, opens the Maestro RFCOMM
 //! channel and exposes it as a tokio AsyncRead/AsyncWrite stream.
 
-use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use bytes::BytesMut;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -285,22 +286,23 @@ pub fn probe() -> Result<()> {
 /// tokio AsyncRead/AsyncWrite wrapper around the RFCOMM channel.
 pub struct RfcommStream {
     rx: UnboundedReceiver<StreamEvent>,
-    buf: VecDeque<u8>,
+    /// Partially-consumed incoming data, compacted as it drains.
+    buf: BytesMut,
     /// Raw pointer to the (intentionally leaked) IOBluetoothRFCOMMChannel.
     channel: usize,
     mtu: usize,
     eof: bool,
 }
 
-// The channel is only used for writeSync/getMTU from this side; IOBluetooth
-// handles its own locking for writes.
+// The channel is only used for writeSync/getMTU/closeChannel from this side;
+// IOBluetooth handles its own locking for those.
 unsafe impl Send for RfcommStream {}
 
 impl RfcommStream {
     pub fn new(rx: UnboundedReceiver<StreamEvent>, channel: usize, mtu: usize) -> Self {
         Self {
             rx,
-            buf: VecDeque::new(),
+            buf: BytesMut::new(),
             channel,
             mtu,
             eof: false,
@@ -312,6 +314,26 @@ impl RfcommStream {
     }
 }
 
+/// Closes the channel when the session drops it, so the buds release the
+/// single control connection and the OS can reclaim the channel (and, once
+/// no callbacks remain in flight, its delegate).
+impl Drop for RfcommStream {
+    fn drop(&mut self) {
+        if self.channel == 0 {
+            return;
+        }
+        let ch = self.channel();
+        unsafe {
+            if ch.isOpen() {
+                // Stop delegate delivery first, then close.
+                let _ = ch.setDelegate(None);
+                let ret = ch.closeChannel();
+                tracing::debug!(ret, "closed RFCOMM channel");
+            }
+        }
+    }
+}
+
 impl AsyncRead for RfcommStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -319,8 +341,9 @@ impl AsyncRead for RfcommStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         loop {
-            if let Some(b) = self.buf.pop_front() {
-                buf.put_slice(&[b]);
+            if !self.buf.is_empty() {
+                let n = self.buf.len().min(buf.remaining());
+                buf.put_slice(&self.buf.split_to(n));
                 return Poll::Ready(Ok(()));
             }
             if self.eof {
@@ -328,7 +351,7 @@ impl AsyncRead for RfcommStream {
             }
             match self.rx.poll_recv(cx) {
                 Poll::Ready(Some(StreamEvent::Data(bytes))) => {
-                    self.buf.extend(bytes);
+                    self.buf.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(StreamEvent::Closed)) | Poll::Ready(None) => {
                     self.eof = true;
