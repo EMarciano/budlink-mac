@@ -1,0 +1,22 @@
+[package]
+name = "budlink-mac"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Control Google Pixel Buds (ANC, battery) from macOS"
+
+[dependencies]
+# Maestro protocol client by Maximilian Luz (MIT/Apache-2.0), not published on crates.io.
+maestro = { git = "https://github.com/qzed/pbpctrl", rev = "2620367a41f92135059f637d92a2e4f427abb44e" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-io-bluetooth = "0.3"
+block2 = "0.6"
+uuid = "1"
+
