@@ -102,3 +102,6 @@ libmaestro's protobuf codegen.
 ## License
 
 GPL-3.0-or-later. libmaestro is MIT/Apache-2.0 by Maximilian Luz.
+
+## Notes
+The current project started as a learning session about Rust, Bluetooth and AI coding
