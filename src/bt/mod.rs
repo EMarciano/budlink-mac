@@ -33,9 +33,32 @@ fn as_any_object<T: Message>(obj: &Retained<T>) -> &AnyObject {
 /// Class of Device values for the Pixel Buds (from pbpctrl).
 const PIXEL_BUDS_CLASSES: [BluetoothClassOfDevice; 2] = [0x240404, 0x244404];
 
+/// The RFCOMM channel is created on the main thread but only ever used for
+/// `writeSync`/`closeChannel`, which IOBluetooth serializes internally — so it
+/// is safe to send to (and call from) the worker thread. objc2 marks the class
+/// `!Send`/`!Sync` by default; this wrapper asserts the narrower guarantee.
+#[derive(Clone)]
+pub struct Channel(Retained<IOBluetoothRFCOMMChannel>);
+
+unsafe impl Send for Channel {}
+unsafe impl Sync for Channel {}
+
+impl std::ops::Deref for Channel {
+    type Target = IOBluetoothRFCOMMChannel;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A successfully opened RFCOMM channel plus its MTU, handed to the worker.
+pub struct OpenedChannel {
+    pub channel: Channel,
+    pub mtu: usize,
+}
+
 pub enum StreamEvent {
-    /// Result of the openRFCOMMChannelAsync call itself: raw channel object and MTU.
-    OpenResult(IOReturn, usize, usize),
+    /// Result of the openRFCOMMChannelAsync call itself.
+    OpenResult(Result<OpenedChannel, IOReturn>),
     /// Async completion of the channel open.
     OpenComplete(IOReturn),
     Data(Vec<u8>),
@@ -288,29 +311,21 @@ pub struct RfcommStream {
     rx: UnboundedReceiver<StreamEvent>,
     /// Partially-consumed incoming data, compacted as it drains.
     buf: BytesMut,
-    /// Raw pointer to the (intentionally leaked) IOBluetoothRFCOMMChannel.
-    channel: usize,
+    /// The opened channel; `writeSync`/`closeChannel` are thread-safe.
+    channel: Channel,
     mtu: usize,
     eof: bool,
 }
 
-// The channel is only used for writeSync/getMTU/closeChannel from this side;
-// IOBluetooth handles its own locking for those.
-unsafe impl Send for RfcommStream {}
-
 impl RfcommStream {
-    pub fn new(rx: UnboundedReceiver<StreamEvent>, channel: usize, mtu: usize) -> Self {
+    pub fn new(rx: UnboundedReceiver<StreamEvent>, opened: OpenedChannel) -> Self {
         Self {
             rx,
             buf: BytesMut::new(),
-            channel,
-            mtu,
+            channel: opened.channel,
+            mtu: opened.mtu,
             eof: false,
         }
-    }
-
-    fn channel(&self) -> &IOBluetoothRFCOMMChannel {
-        unsafe { &*(self.channel as *const IOBluetoothRFCOMMChannel) }
     }
 }
 
@@ -319,10 +334,7 @@ impl RfcommStream {
 /// no callbacks remain in flight, its delegate).
 impl Drop for RfcommStream {
     fn drop(&mut self) {
-        if self.channel == 0 {
-            return;
-        }
-        let ch = self.channel();
+        let ch = &*self.channel;
         unsafe {
             if ch.isOpen() {
                 // Stop delegate delivery first, then close.
@@ -375,7 +387,7 @@ impl AsyncWrite for RfcommStream {
         }
         let n = buf.len().min(self.mtu).min(u16::MAX as usize);
         let ret = unsafe {
-            self.channel()
+            self.channel
                 .writeSync_length(buf.as_ptr() as *mut c_void, n as u16)
         };
         if ret != 0 {
@@ -421,18 +433,21 @@ pub fn open_maestro_channel(tx: &UnboundedSender<StreamEvent>) {
             );
             tracing::debug!(ret, "openRFCOMMChannelAsync returned");
 
-            let (raw, mtu) = match channel {
+            let opened = match channel {
                 Some(channel) if ret == 0 => {
                     let mtu = channel.getMTU() as usize;
-                    // Leak the channel and delegate: they must live as long as
-                    // the runloop keeps delivering callbacks.
-                    (Retained::into_raw(channel) as usize, mtu)
+                    Ok(OpenedChannel {
+                        channel: Channel(channel),
+                        mtu,
+                    })
                 }
-                _ => (0, 0),
+                _ => Err(ret),
             };
+            // The delegate must live as long as the runloop delivers callbacks.
             std::mem::forget(delegate);
-            let _ = tx.send(StreamEvent::OpenResult(ret, raw, mtu));
-            if ret != 0 {
+            let failed = matches!(opened, Err(_));
+            let _ = tx.send(StreamEvent::OpenResult(opened));
+            if failed {
                 bail!("openRFCOMMChannelAsync failed (IOReturn {ret})");
             }
             Ok(())
@@ -463,10 +478,10 @@ pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
 /// Waits for the channel open events and builds the stream.
 pub async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<RfcommStream> {
     let open = async {
-        let (raw, mtu) = loop {
+        let opened = loop {
             match rx.recv().await {
-                Some(StreamEvent::OpenResult(0, raw, mtu)) => break (raw, mtu),
-                Some(StreamEvent::OpenResult(ret, _, _)) => {
+                Some(StreamEvent::OpenResult(Ok(opened))) => break opened,
+                Some(StreamEvent::OpenResult(Err(ret))) => {
                     bail!("openRFCOMMChannelAsync failed (IOReturn {ret})")
                 }
                 Some(StreamEvent::Error(e)) => bail!(e),
@@ -485,7 +500,7 @@ pub async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<Rfc
                 None => bail!("bluetooth main loop died before open completed"),
             }
         }
-        Ok(RfcommStream::new(rx, raw, mtu))
+        Ok(RfcommStream::new(rx, opened))
     };
     tokio::time::timeout(std::time::Duration::from_secs(30), open)
         .await

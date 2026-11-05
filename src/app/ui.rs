@@ -289,33 +289,48 @@ impl UiController {
 
 /// Worker-thread handle to the UI: updates shared state and asks the main
 /// thread to re-apply it / open the Bluetooth channel.
+///
+/// The controller is created and leaked on the main thread for the app's
+/// lifetime; the worker only ever messages it via
+/// `performSelectorOnMainThread` (which AppKit serializes onto the main
+/// thread), so holding a typed `Retained` here instead of a raw pointer is
+/// sound and lets the borrow checker check the rest of the code.
 #[derive(Clone)]
 pub struct UiHandle {
-    ctrl: usize, // Retained<UiController> as raw pointer (leaked, lives forever)
+    ctrl: MainThreadOnly<UiController>,
     state: Arc<Mutex<UiState>>,
     open_slot: Arc<Mutex<Option<UnboundedSender<StreamEvent>>>>,
 }
 
-// The controller is only ever messaged via performSelectorOnMainThread.
-unsafe impl Send for UiHandle {}
+/// Wraps a main-thread object so it can be held (not called) from the worker.
+/// All access goes through `UiHandle::call_main`, which hops to the main
+/// thread before touching the object.
+struct MainThreadOnly<T: objc2::Message>(Retained<T>);
+unsafe impl<T: objc2::Message> Send for MainThreadOnly<T> {}
+impl<T: objc2::Message> Clone for MainThreadOnly<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 impl UiHandle {
     pub fn new(
-        ctrl: &Retained<UiController>,
+        ctrl: Retained<UiController>,
         state: Arc<Mutex<UiState>>,
         open_slot: Arc<Mutex<Option<UnboundedSender<StreamEvent>>>>,
     ) -> Self {
         Self {
-            ctrl: Retained::as_ptr(ctrl) as usize,
+            ctrl: MainThreadOnly(ctrl),
             state,
             open_slot,
         }
     }
 
     fn call_main(&self, selector: objc2::runtime::Sel) {
-        let ctrl = unsafe { &*(self.ctrl as *const NSObject) };
         unsafe {
-            ctrl.performSelectorOnMainThread_withObject_waitUntilDone(selector, None, false)
+            self.ctrl
+                .0
+                .performSelectorOnMainThread_withObject_waitUntilDone(selector, None, false)
         };
     }
 

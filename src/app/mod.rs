@@ -31,8 +31,7 @@ pub fn run() -> ExitCode {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<worker::UiCommand>();
 
     let controller = ui::UiController::new(mtm, cmd_tx, state.clone(), open_slot.clone());
-    let handle = ui::UiHandle::new(&controller, state, open_slot);
-    std::mem::forget(controller); // lives for the app's lifetime
+    let handle = ui::UiHandle::new(controller, state, open_slot); // Retained keeps it alive
 
     std::thread::Builder::new()
         .name("tokio".into())
