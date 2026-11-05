@@ -9,11 +9,11 @@ use std::task::{Context, Poll};
 
 use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, AllocAnyThread, ClassType, DefinedClass, Message};
+use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, Message};
 use objc2_foundation::{NSArray, NSRunLoop, NSObject};
 use objc2_io_bluetooth::{
     BluetoothClassOfDevice, BluetoothRFCOMMChannelID, IOBluetoothDevice,
@@ -38,8 +38,8 @@ fn as_any_object<T: Message>(obj: &Retained<T>) -> &AnyObject {
 const PIXEL_BUDS_CLASSES: [BluetoothClassOfDevice; 2] = [0x240404, 0x244404];
 
 pub enum StreamEvent {
-    /// Result of the openRFCOMMChannelAsync call itself, plus the raw channel object.
-    OpenResult(IOReturn, usize),
+    /// Result of the openRFCOMMChannelAsync call itself: raw channel object and MTU.
+    OpenResult(IOReturn, usize, usize),
     /// Async completion of the channel open.
     OpenComplete(IOReturn),
     Data(Vec<u8>),
@@ -296,6 +296,16 @@ pub struct RfcommStream {
 unsafe impl Send for RfcommStream {}
 
 impl RfcommStream {
+    pub fn new(rx: UnboundedReceiver<StreamEvent>, channel: usize, mtu: usize) -> Self {
+        Self {
+            rx,
+            buf: VecDeque::new(),
+            channel,
+            mtu,
+            eof: false,
+        }
+    }
+
     fn channel(&self) -> &IOBluetoothRFCOMMChannel {
         unsafe { &*(self.channel as *const IOBluetoothRFCOMMChannel) }
     }
@@ -363,93 +373,58 @@ impl AsyncWrite for RfcommStream {
     }
 }
 
-/// Open the Maestro RFCOMM channel to the buds and return a stream for it.
-///
-/// Spawns a dedicated thread running an NSRunLoop; all IOBluetooth work
-/// happens there and delegate callbacks deliver data through a channel.
-pub async fn connect_maestro() -> Result<RfcommStream> {
-    let (tx, mut rx) = unbounded_channel::<StreamEvent>();
-    let (setup_tx, setup_rx) = std::sync::mpsc::channel::<Result<(usize, usize)>>();
+/// Open the Maestro RFCOMM channel to the buds, then pump the main runloop
+/// forever. Must be called on the MAIN thread: IOBluetooth's first use and
+/// its XPC handshake with bluetoothd are not safe when the main thread is
+/// blocked elsewhere. Events are delivered through `tx`.
+pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
+    let setup = autoreleasepool(|_| unsafe {
+        (|| -> Result<(usize, usize)> {
+            tracing::debug!("finding buds");
+            let dev = find_buds()?;
+            tracing::debug!("sdp query");
+            let channel_id = find_maestro_channel(&dev)?;
+            tracing::debug!(channel_id, "opening rfcomm channel");
 
-    std::thread::Builder::new()
-        .name("iobluetooth".into())
-        .spawn(move || {
-            eprintln!("[bt] thread started");
-            objc2::rc::autoreleasepool(|_| unsafe {
-                let setup = (|| -> Result<(usize, usize)> {
-                    eprintln!("[bt] finding buds");
-                    tracing::debug!("bt thread: finding buds");
-                    let dev = find_buds()?;
-                    tracing::debug!("bt thread: sdp query");
-                    let channel_id = find_maestro_channel(&dev)?;
-                    tracing::debug!(channel_id, "bt thread: opening rfcomm channel");
+            let delegate = BtDelegate::new(tx.clone());
 
-                    let delegate = BtDelegate::new(tx.clone());
+            let mut channel: Option<Retained<IOBluetoothRFCOMMChannel>> = None;
+            let ret = dev.openRFCOMMChannelAsync_withChannelID_delegate(
+                Some(&mut channel),
+                channel_id,
+                Some(as_any_object(&delegate)),
+            );
+            tracing::debug!(ret, "openRFCOMMChannelAsync returned");
 
-                    let mut channel: Option<Retained<IOBluetoothRFCOMMChannel>> = None;
-                    let ret = dev.openRFCOMMChannelAsync_withChannelID_delegate(
-                        Some(&mut channel),
-                        channel_id,
-                        Some(as_any_object(&delegate)),
-                    );
-                    tracing::debug!(ret, "bt thread: openRFCOMMChannelAsync returned");
-                    if ret != 0 {
-                        bail!("openRFCOMMChannelAsync failed (IOReturn {ret})");
-                    }
-                    let channel = channel.ok_or_else(|| anyhow!("no channel returned"))?;
+            let (raw, mtu) = match channel {
+                Some(channel) if ret == 0 => {
                     let mtu = channel.getMTU() as usize;
-                    // Leak the channel: it must outlive this function; the
-                    // delegate keeps receiving data as long as the runloop runs.
-                    let raw = Retained::into_raw(channel) as usize;
-                    // Keep the delegate alive forever (runloop thread owns it).
-                    std::mem::forget(delegate);
-                    Ok((raw, mtu))
-                })();
-
-                if setup.is_err() {
-                    let _ = setup_tx.send(setup);
-                    return;
+                    // Leak the channel and delegate: they must live as long as
+                    // the runloop keeps delivering callbacks.
+                    (Retained::into_raw(channel) as usize, mtu)
                 }
-                let _ = setup_tx.send(setup);
-                drop(tx);
-
-                // `-[NSRunLoop run]` on a bare thread returns immediately if no
-                // sources are attached yet, so pump the runloop manually.
-                let run_loop = NSRunLoop::currentRunLoop();
-                loop {
-                    let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(1.0);
-                    autoreleasepool(|_| {
-                        run_loop.runMode_beforeDate(
-                            objc2_foundation::NSDefaultRunLoopMode,
-                            &until,
-                        );
-                    });
-                }
-            });
-        })?;
-
-    let (raw, mtu) = setup_rx
-        .recv()
-        .map_err(|_| anyhow!("bluetooth thread died"))??;
-
-    // Wait for the async open to complete.
-    loop {
-        match rx.recv().await {
-            Some(StreamEvent::OpenComplete(0)) => break,
-            Some(StreamEvent::OpenComplete(status)) => {
-                bail!("RFCOMM channel open failed (IOReturn {status})")
+                _ => (0, 0),
+            };
+            std::mem::forget(delegate);
+            let _ = tx.send(StreamEvent::OpenResult(ret, raw, mtu));
+            if ret != 0 {
+                bail!("openRFCOMMChannelAsync failed (IOReturn {ret})");
             }
-            Some(_) => continue,
-            None => bail!("bluetooth thread died before channel opened"),
-        }
+            Ok((raw, mtu))
+        })()
+    });
+
+    if let Err(e) = setup {
+        let _ = tx.send(StreamEvent::Error(format!("{e:#}")));
     }
 
-    tracing::info!(mtu, "RFCOMM channel open");
-    Ok(RfcommStream {
-        rx,
-        buf: VecDeque::new(),
-        channel: raw,
-        mtu,
-        eof: false,
-    })
+    // `-[NSRunLoop run]` on a thread without sources yet returns immediately,
+    // so pump the runloop manually.
+    let run_loop = NSRunLoop::currentRunLoop();
+    loop {
+        let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(1.0);
+        autoreleasepool(|_| {
+            run_loop.runMode_beforeDate(unsafe { objc2_foundation::NSDefaultRunLoopMode }, &until);
+        });
+    }
 }
