@@ -32,8 +32,8 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("budlink_mac=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("budlink_mac=info")),
         )
         .init();
 
@@ -141,7 +141,10 @@ async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<RfcommS
     };
     tokio::time::timeout(Duration::from_secs(30), open)
         .await
-        .context("timed out opening RFCOMM channel")?
+        .context(
+            "timed out opening RFCOMM channel (the buds accept a single control connection: \
+             close the Pixel Buds app on your phone, and check for a stale budlink-mac process)",
+        )?
 }
 
 /// Opens the Maestro connection and starts the RPC client.

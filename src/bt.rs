@@ -125,6 +125,9 @@ unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
     let Some(devices) = (unsafe { IOBluetoothDevice::pairedDevices() }) else {
         bail!("no paired devices");
     };
+    // Name matches are authoritative; the class-of-device values are shared
+    // with other earbuds (e.g. Nothing Ear), so they are only a fallback.
+    let mut class_match: Option<Retained<IOBluetoothDevice>> = None;
     let mut buds: Option<Retained<IOBluetoothDevice>> = None;
     for obj in devices.iter() {
         let Some(dev) = obj.downcast_ref::<IOBluetoothDevice>() else {
@@ -132,22 +135,26 @@ unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
         };
         let name = unsafe { dev.name() }.to_string();
         let class = unsafe { dev.classOfDevice() };
-        let looks_like_buds =
-            name.contains("Pixel Buds") || PIXEL_BUDS_CLASSES.contains(&class);
-        if !looks_like_buds {
+        let by_name = name.contains("Pixel Buds");
+        if !by_name && !PIXEL_BUDS_CLASSES.contains(&class) {
             continue;
         }
-        tracing::debug!(%name, class = format_args!("0x{class:06x}"), "candidate device");
-        if unsafe { dev.isConnected() } {
-            buds = Some(dev.retain());
-            break;
-        }
-        // Keep the first match as a fallback even if not connected.
-        if buds.is_none() {
-            buds = Some(dev.retain());
+        tracing::debug!(%name, class = format_args!("0x{class:06x}"), by_name, "candidate device");
+        if by_name {
+            if unsafe { dev.isConnected() } {
+                buds = Some(dev.retain());
+                break;
+            }
+            if buds.is_none() {
+                buds = Some(dev.retain());
+            }
+        } else if class_match.is_none() {
+            class_match = Some(dev.retain());
         }
     }
-    let dev = buds.ok_or_else(|| anyhow!("no paired Pixel Buds found"))?;
+    let dev = buds
+        .or(class_match)
+        .ok_or_else(|| anyhow!("no paired Pixel Buds found"))?;
 
     if !unsafe { dev.isConnected() } {
         tracing::info!("buds not connected, opening baseband connection");
