@@ -21,4 +21,5 @@ block2 = "0.6"
 uuid = "1"
 objc2-app-kit = "0.3.2"
 bytes = "1"
+libc = "0.2.191"
 

@@ -1,5 +1,6 @@
 //! Menu bar application: AppKit status item + connection worker.
 
+mod single_instance;
 mod ui;
 mod worker;
 
@@ -12,6 +13,14 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 /// Runs the menu bar app: AppKit on the main thread, tokio worker for the
 /// protocol. Never returns until the user quits.
 pub fn run() -> ExitCode {
+    let _guard = match single_instance::SingleInstance::acquire() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
