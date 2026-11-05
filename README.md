@@ -26,6 +26,26 @@ case has no Bluetooth radio of its own). The Pixel Buds 2a have no Adaptive
 mode — requesting it is rejected by the buds (`Unknown` status), same as on
 the original Linux app.
 
+### Is the missing Adaptive mode a hardware or software limitation?
+
+Investigated on 2026-11-05. Verdict: **firmware feature-gating (software),
+not a documented hardware limitation.** Device-side evidence (see
+`budlink-mac settings` and the hidden `x-gesture-adaptive` experiment):
+
+- The 2a run firmware `release_4.467` — the same version that *delivered*
+  Adaptive Audio to the Pixel Buds Pro 2 as a post-launch software update,
+  proving the feature is firmware/DSP, not launch silicon.
+- The 2a's settings schema accepts Adaptive: writing a gesture loop of
+  `[active, aware, adaptive]` succeeds and reads back — only activating the
+  mode (`CurrentAncrState = Adaptive`) is rejected (`Unknown`).
+- Google's own docs attribute Adaptive Audio processing to the Tensor A1
+  chip, which both models share.
+
+Caveat: the 2a does have reduced ANC hardware (2 mics/bud vs 3, no
+voice/motion sensors, "Silent Seal 1.5" vs 2.0), so a hardware-*quality*
+rationale is conceivable — but no Google doc, teardown, or reviewer claims
+Adaptive depends on those parts, and Google has never stated a rationale.
+
 Set `RUST_LOG=budlink_mac=debug` for verbose logs.
 
 ## How it works

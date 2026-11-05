@@ -26,6 +26,7 @@ usage:
   budlink-mac probe        show SDP services of the buds (find the Maestro channel)
   budlink-mac status       show battery levels and current noise control mode
   budlink-mac anc <mode>   set noise control: off | active | aware | adaptive
+  budlink-mac settings     dump firmware info and ANC-related settings (diagnostic)
 ";
 
 fn main() -> ExitCode {
@@ -42,6 +43,8 @@ fn main() -> ExitCode {
         "list" => report(bt::list_devices()),
         "probe" => report(bt::probe()),
         "status" => run_cmd(status),
+        "settings" => run_cmd(settings_dump),
+        "x-gesture-adaptive" => run_cmd(gesture_adaptive_experiment),
         "anc" => {
             let Some(mode) = std::env::args().nth(2) else {
                 eprint!("{USAGE}");
@@ -236,6 +239,90 @@ async fn status(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
     match read_anc_state(&mut service).await {
         Ok(state) => println!("Noise control: {} (raw {})", state.as_str(), i32::from(state)),
         Err(e) => println!("Noise control: unreadable ({e})"),
+    }
+
+    client_task.abort();
+    Ok(())
+}
+
+async fn settings_dump(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
+    let (handle, channel, client_task) = setup_client(rx).await?;
+    let mut service = MaestroService::new(handle, channel);
+
+    match service.get_software_info().await {
+        Ok(sw) => {
+            if let Some(fw) = sw.firmware {
+                for (label, v) in [
+                    ("case ", fw.case),
+                    ("left ", fw.left),
+                    ("right", fw.right),
+                ] {
+                    match v {
+                        Some(v) => println!("firmware {label}: {}", v.version_string),
+                        None => println!("firmware {label}: unknown"),
+                    }
+                }
+            }
+        }
+        Err(e) => println!("firmware info unreadable: {e}"),
+    }
+
+    println!("Settings:");
+    for id in [
+        SettingId::CurrentAncrState,
+        SettingId::AncrStateOneBud,
+        SettingId::AncrStateTwoBuds,
+        SettingId::AncrGestureLoop,
+        SettingId::AncAccessibilityMode,
+        SettingId::MultipointEnable,
+        SettingId::GestureEnable,
+    ] {
+        match service.read_setting_var(id).await {
+            Ok(v) => println!("  {id:?}: {v:?}"),
+            Err(e) => println!("  {id:?}: error ({e})"),
+        }
+    }
+
+    client_task.abort();
+    Ok(())
+}
+
+/// One-off experiment: try enabling `adaptive` in the gesture loop, then
+/// restore the original configuration. Determines whether the 2a firmware
+/// gates Adaptive mode at the setting level or only at the state level.
+async fn gesture_adaptive_experiment(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
+    use maestro::service::settings::AncrGestureLoop;
+
+    let (handle, channel, client_task) = setup_client(rx).await?;
+    let mut service = MaestroService::new(handle, channel);
+
+    let original = match service.read_setting_var(SettingId::AncrGestureLoop).await? {
+        SettingValue::AncrGestureLoop(l) => l,
+        other => bail!("unexpected value: {other:?}"),
+    };
+    println!("original gesture loop: {original}");
+
+    let mut modified = original;
+    modified.adaptive = true;
+    println!("writing gesture loop with adaptive enabled: {modified}");
+    let res = service
+        .write_setting(SettingValue::AncrGestureLoop(modified))
+        .await;
+    match &res {
+        Ok(()) => println!("WRITE ACCEPTED"),
+        Err(e) => println!("WRITE REJECTED: {e}"),
+    }
+
+    if res.is_ok() {
+        // Read back, then restore.
+        match service.read_setting_var(SettingId::AncrGestureLoop).await? {
+            SettingValue::AncrGestureLoop(l) => println!("read back: {l}"),
+            other => println!("read back unexpected: {other:?}"),
+        }
+        service
+            .write_setting(SettingValue::AncrGestureLoop(original))
+            .await?;
+        println!("restored original gesture loop");
     }
 
     client_task.abort();
