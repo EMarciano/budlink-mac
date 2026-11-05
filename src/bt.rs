@@ -14,7 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, Message};
-use objc2_foundation::{NSArray, NSRunLoop, NSObject};
+use objc2_foundation::{NSRunLoop, NSObject};
 use objc2_io_bluetooth::{
     BluetoothClassOfDevice, BluetoothRFCOMMChannelID, IOBluetoothDevice,
     IOBluetoothRFCOMMChannel, IOBluetoothRFCOMMChannelDelegate, IOBluetoothSDPDataElement,
@@ -23,11 +23,6 @@ use objc2_io_bluetooth::{
 
 #[allow(non_camel_case_types)]
 type IOReturn = std::ffi::c_int;
-
-/// Reinterpret a typed NSArray as an untyped one (same layout).
-fn nsarray_untyped<T>(arr: &NSArray<T>) -> &NSArray {
-    unsafe { &*(arr as *const NSArray<T> as *const NSArray) }
-}
 
 /// Reinterpret a retained object as AnyObject (same layout).
 fn as_any_object<T: Message>(obj: &Retained<T>) -> &AnyObject {
