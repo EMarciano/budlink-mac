@@ -22,8 +22,22 @@ cargo run -- anc <mode>   # set noise control: off | active | aware | adaptive
 The menu bar app shows an earbuds icon with per-bud battery levels, a battery
 breakdown, and a checkmarked noise-control menu (Off / ANC / Transparency /
 Adaptive). It follows changes made on the buds themselves (touch-and-hold),
-greys out modes the buds reject, and reconnects automatically — retrying every
-10 s and whenever you click *Reconnect* — when the buds leave and return.
+greys out modes the buds reject, and reconnects automatically when the buds
+leave and return.
+
+### Run at login (launchd agent)
+
+```
+cargo run --release -- install-agent      # install binary to ~/.local/bin + start
+budlink-mac agent-status                  # check state
+budlink-mac uninstall-agent               # remove
+```
+
+This installs a per-user LaunchAgent
+(`~/Library/LaunchAgents/io.github.emarciano.budlink-mac.plist`) that starts
+the menu bar app at login and restarts it on crash — so whenever the buds
+connect to the Mac, the app picks them up within a few seconds. No root, no
+machine-specific paths; logs go to `~/Library/Logs/budlink-mac.log`.
 
 Pair and connect the buds in macOS Bluetooth settings first. The buds reject
 noise-control changes (`FailedPrecondition`) unless they detect that they are

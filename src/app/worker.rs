@@ -58,14 +58,21 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                     s.error = if waiting { None } else { Some(short_error(&e)) };
                 });
 
-                // Auto-retry after a delay, or immediately on Reconnect.
+                // Auto-retry, faster when we're just waiting for the buds to
+                // link (pending open) vs. a real protocol error; or
+                // immediately on Reconnect.
+                let delay = if waiting {
+                    Duration::from_secs(3)
+                } else {
+                    Duration::from_secs(10)
+                };
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
                         Some(UiCommand::Reconnect) => continue,
                         Some(UiCommand::SetAnc(_)) => continue, // retry anyway
                         None => return,
                     },
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
+                    _ = tokio::time::sleep(delay) => continue,
                 }
             }
         }
