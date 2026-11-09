@@ -48,7 +48,13 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
             Ok(SessionEnd::Reconnect) => continue,
             Err(e) => {
                 tracing::warn!(error = ?e, "session ended");
-                let waiting = format!("{e:#}").contains("timed out opening");
+                // Both mean the buds are out of reach right now: a pending
+                // channel open, or the Maestro service not yet in SDP records
+                // (buds linked but services not resolved yet). Both are
+                // transient — stay quiet and retry fast.
+                let err_chain = format!("{e:#}");
+                let waiting = err_chain.contains("timed out opening")
+                    || err_chain.contains("Maestro service");
                 ui.update(|s| {
                     s.connected = false;
                     // A pending open just means the buds are not linked to this
@@ -83,7 +89,10 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
 /// the logs (RUST_LOG).
 fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
-    if s.contains("no paired Pixel Buds") || s.contains("timed out opening") {
+    if s.contains("no paired Pixel Buds")
+        || s.contains("timed out opening")
+        || s.contains("Maestro service")
+    {
         return "buds not found".to_string();
     }
     if s.contains("single control connection") || s.contains("IO stream closed") {
