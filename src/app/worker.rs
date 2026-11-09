@@ -31,8 +31,14 @@ enum SessionEnd {
     Reconnect,
 }
 
-/// Connection supervisor: (re)connects, serves, and retries with backoff.
+/// Failed connection attempts before the supervisor gives up and idles
+/// (clicking Reconnect starts a fresh burst).
+const MAX_ATTEMPTS: u32 = 5;
+
+/// Connection supervisor: tries to connect up to MAX_ATTEMPTS times, then
+/// idles until the user clicks Reconnect (which starts a fresh burst).
 pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
+    let mut attempts = 0u32;
     loop {
         ui.update(|s| {
             s.connected = false;
@@ -45,9 +51,13 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
 
         match session(rx, &mut cmd_rx, &ui).await {
             Ok(SessionEnd::Quit) => return,
-            Ok(SessionEnd::Reconnect) => continue,
+            Ok(SessionEnd::Reconnect) => {
+                attempts = 0;
+                continue;
+            }
             Err(e) => {
-                tracing::warn!(error = ?e, "session ended");
+                attempts += 1;
+                tracing::warn!(error = ?e, attempt = attempts, "session ended");
                 // Both mean the buds are out of reach right now: a pending
                 // channel open, or the Maestro service not yet in SDP records
                 // (buds linked but services not resolved yet). Both are
@@ -55,6 +65,25 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                 let err_chain = format!("{e:#}");
                 let waiting = err_chain.contains("timed out opening")
                     || err_chain.contains("Maestro service");
+
+                if attempts >= MAX_ATTEMPTS {
+                    ui.update(|s| {
+                        s.connected = false;
+                        s.connecting = false;
+                        s.anc = None;
+                        s.error = Some("not found — click Reconnect".to_string());
+                    });
+                    // Idle until the user asks for a fresh burst (or quits).
+                    match cmd_rx.recv().await {
+                        Some(UiCommand::Reconnect) => {
+                            attempts = 0;
+                            continue;
+                        }
+                        Some(UiCommand::SetAnc(_)) => continue, // retry the burst
+                        None => return,
+                    }
+                }
+
                 ui.update(|s| {
                     s.connected = false;
                     // A pending open just means the buds are not linked to this
@@ -74,7 +103,10 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                 };
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(UiCommand::Reconnect) => continue,
+                        Some(UiCommand::Reconnect) => {
+                            attempts = 0;
+                            continue;
+                        }
                         Some(UiCommand::SetAnc(_)) => continue, // retry anyway
                         None => return,
                     },
