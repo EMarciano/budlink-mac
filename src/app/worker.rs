@@ -79,9 +79,17 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
     }
 }
 
+/// Menu-friendly one-liner for a session error; technical detail stays in
+/// the logs (RUST_LOG).
 fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
-    s.chars().take(80).collect()
+    if s.contains("no paired Pixel Buds") || s.contains("timed out opening") {
+        return "buds not found".to_string();
+    }
+    if s.contains("single control connection") || s.contains("IO stream closed") {
+        return "connection lost".to_string();
+    }
+    s.chars().take(40).collect()
 }
 
 async fn session(

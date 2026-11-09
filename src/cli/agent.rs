@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context as _, Result};
 
-const LABEL: &str = "io.github.emarciano.budlink-mac";
+const LABEL: &str = "budlink-mac";
 const BIN_NAME: &str = "budlink-mac";
 
 fn home() -> Result<PathBuf> {
