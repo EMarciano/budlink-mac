@@ -31,8 +31,14 @@ enum SessionEnd {
     Reconnect,
 }
 
-/// Connection supervisor: (re)connects, serves, and retries with backoff.
+/// Failed connection attempts before the supervisor gives up and idles
+/// (clicking Reconnect starts a fresh burst).
+const MAX_ATTEMPTS: u32 = 5;
+
+/// Connection supervisor: tries to connect up to MAX_ATTEMPTS times, then
+/// idles until the user clicks Reconnect (which starts a fresh burst).
 pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
+    let mut attempts = 0u32;
     loop {
         ui.update(|s| {
             s.connected = false;
@@ -45,10 +51,39 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
 
         match session(rx, &mut cmd_rx, &ui).await {
             Ok(SessionEnd::Quit) => return,
-            Ok(SessionEnd::Reconnect) => continue,
+            Ok(SessionEnd::Reconnect) => {
+                attempts = 0;
+                continue;
+            }
             Err(e) => {
-                tracing::warn!(error = ?e, "session ended");
-                let waiting = format!("{e:#}").contains("timed out opening");
+                attempts += 1;
+                tracing::warn!(error = ?e, attempt = attempts, "session ended");
+                // Both mean the buds are out of reach right now: a pending
+                // channel open, or the Maestro service not yet in SDP records
+                // (buds linked but services not resolved yet). Both are
+                // transient — stay quiet and retry fast.
+                let err_chain = format!("{e:#}");
+                let waiting = err_chain.contains("timed out opening")
+                    || err_chain.contains("Maestro service");
+
+                if attempts >= MAX_ATTEMPTS {
+                    ui.update(|s| {
+                        s.connected = false;
+                        s.connecting = false;
+                        s.anc = None;
+                        s.error = Some("not found — click Reconnect".to_string());
+                    });
+                    // Idle until the user asks for a fresh burst (or quits).
+                    match cmd_rx.recv().await {
+                        Some(UiCommand::Reconnect) => {
+                            attempts = 0;
+                            continue;
+                        }
+                        Some(UiCommand::SetAnc(_)) => continue, // retry the burst
+                        None => return,
+                    }
+                }
+
                 ui.update(|s| {
                     s.connected = false;
                     // A pending open just means the buds are not linked to this
@@ -58,23 +93,44 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                     s.error = if waiting { None } else { Some(short_error(&e)) };
                 });
 
-                // Auto-retry after a delay, or immediately on Reconnect.
+                // Auto-retry, faster when we're just waiting for the buds to
+                // link (pending open) vs. a real protocol error; or
+                // immediately on Reconnect.
+                let delay = if waiting {
+                    Duration::from_secs(3)
+                } else {
+                    Duration::from_secs(10)
+                };
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(UiCommand::Reconnect) => continue,
+                        Some(UiCommand::Reconnect) => {
+                            attempts = 0;
+                            continue;
+                        }
                         Some(UiCommand::SetAnc(_)) => continue, // retry anyway
                         None => return,
                     },
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
+                    _ = tokio::time::sleep(delay) => continue,
                 }
             }
         }
     }
 }
 
+/// Menu-friendly one-liner for a session error; technical detail stays in
+/// the logs (RUST_LOG).
 fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
-    s.chars().take(80).collect()
+    if s.contains("no paired Pixel Buds")
+        || s.contains("timed out opening")
+        || s.contains("Maestro service")
+    {
+        return "buds not found".to_string();
+    }
+    if s.contains("single control connection") || s.contains("IO stream closed") {
+        return "connection lost".to_string();
+    }
+    s.chars().take(40).collect()
 }
 
 async fn session(

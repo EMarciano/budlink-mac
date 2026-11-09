@@ -1,5 +1,6 @@
 //! Command-line interface: argument parsing and the run harness.
 
+mod agent;
 mod client;
 pub mod commands;
 
@@ -22,6 +23,9 @@ usage:
   budlink-mac anc <mode>   set noise control: off | active | aware | adaptive
   budlink-mac settings     dump firmware info and ANC-related settings (diagnostic)
   budlink-mac menubar      run the menu bar app (battery icon + noise control)
+  budlink-mac install-agent    install + start at login (launchd agent)
+  budlink-mac uninstall-agent  remove the launchd agent
+  budlink-mac agent-status     show agent installation state
 ";
 
 /// Parses argv and runs the selected command, or `None` if the arguments
@@ -35,6 +39,9 @@ pub fn run() -> Option<ExitCode> {
         "settings" => run_cmd(commands::settings_dump),
         "x-gesture-adaptive" => run_cmd(commands::gesture_adaptive_experiment),
         "menubar" => return None,
+        "install-agent" => report(agent::install()),
+        "uninstall-agent" => report(agent::uninstall()),
+        "agent-status" => report(agent::print_status()),
         "anc" => {
             let Some(mode) = std::env::args().nth(2) else {
                 eprint!("{USAGE}");
