@@ -1,6 +1,3 @@
-//! macOS IOBluetooth bridge: finds the Pixel Buds, opens the Maestro RFCOMM
-//! channel and exposes it as a tokio AsyncRead/AsyncWrite stream.
-
 use std::ffi::c_void;
 use std::io;
 use std::pin::Pin;
@@ -25,7 +22,6 @@ use objc2_io_bluetooth::{
 #[allow(non_camel_case_types)]
 type IOReturn = std::ffi::c_int;
 
-/// Reinterpret a retained object as AnyObject (same layout).
 fn as_any_object<T: Message>(obj: &Retained<T>) -> &AnyObject {
     unsafe { &*(Retained::as_ptr(obj) as *const AnyObject) }
 }
@@ -50,7 +46,6 @@ impl std::ops::Deref for Channel {
     }
 }
 
-/// A successfully opened RFCOMM channel plus its MTU, handed to the worker.
 pub struct OpenedChannel {
     pub channel: Channel,
     pub mtu: usize,
@@ -118,7 +113,6 @@ fn maestro_sdp_uuid() -> Retained<IOBluetoothSDPUUID> {
         .expect("failed to create SDP UUID")
 }
 
-/// List all paired devices (for the `list` command).
 pub fn list_devices() -> Result<()> {
     objc2::rc::autoreleasepool(|_| unsafe {
         let Some(devices) = IOBluetoothDevice::pairedDevices() else {
@@ -144,7 +138,6 @@ pub fn list_devices() -> Result<()> {
     })
 }
 
-/// Find a connected Pixel Buds device among the paired ones.
 unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
     let Some(devices) = (unsafe { IOBluetoothDevice::pairedDevices() }) else {
         bail!("no paired devices");
@@ -181,14 +174,11 @@ unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
         .ok_or_else(|| anyhow!("no paired Pixel Buds found"))?;
 
     if !unsafe { dev.isConnected() } {
-        // openRFCOMMChannelAsync opens the baseband connection itself;
-        // note in the log for diagnostics only.
         tracing::info!("buds not currently connected; channel open will establish the link");
     }
     Ok(dev)
 }
 
-/// Recursively collect every UUID mentioned in an SDP data element tree.
 unsafe fn element_uuids(el: &IOBluetoothSDPDataElement, out: &mut Vec<Retained<IOBluetoothSDPUUID>>) {
     unsafe {
         if let Some(u) = el.getUUIDValue() {
@@ -204,7 +194,6 @@ unsafe fn element_uuids(el: &IOBluetoothSDPDataElement, out: &mut Vec<Retained<I
     }
 }
 
-/// Every UUID mentioned anywhere in a service record's attributes.
 unsafe fn record_uuids(rec: &IOBluetoothSDPServiceRecord) -> Vec<Retained<IOBluetoothSDPUUID>> {
     let mut out = Vec::new();
     unsafe {
@@ -228,7 +217,6 @@ unsafe fn record_is_maestro(rec: &IOBluetoothSDPServiceRecord) -> bool {
         .any(|u| unsafe { u.isEqualToUUID(Some(&target)) })
 }
 
-/// Run an SDP query and locate the RFCOMM channel of the Maestro service.
 unsafe fn find_maestro_channel(dev: &IOBluetoothDevice) -> Result<BluetoothRFCOMMChannelID> {
     let ret = unsafe { dev.performSDPQuery(None) };
     if ret != 0 {
@@ -265,7 +253,6 @@ unsafe fn find_maestro_channel(dev: &IOBluetoothDevice) -> Result<BluetoothRFCOM
     bail!("Maestro service (uuid {}) not found in SDP records", maestro::UUID)
 }
 
-/// Print the SDP services of the buds (for the `probe` command).
 pub fn probe() -> Result<()> {
     objc2::rc::autoreleasepool(|_| unsafe {
         let dev = find_buds()?;
@@ -306,12 +293,9 @@ pub fn probe() -> Result<()> {
     })
 }
 
-/// tokio AsyncRead/AsyncWrite wrapper around the RFCOMM channel.
 pub struct RfcommStream {
     rx: UnboundedReceiver<StreamEvent>,
-    /// Partially-consumed incoming data, compacted as it drains.
     buf: BytesMut,
-    /// The opened channel; `writeSync`/`closeChannel` are thread-safe.
     channel: Channel,
     mtu: usize,
     eof: bool,
@@ -329,15 +313,11 @@ impl RfcommStream {
     }
 }
 
-/// Closes the channel when the session drops it, so the buds release the
-/// single control connection and the OS can reclaim the channel (and, once
-/// no callbacks remain in flight, its delegate).
 impl Drop for RfcommStream {
     fn drop(&mut self) {
         let ch = &*self.channel;
         unsafe {
             if ch.isOpen() {
-                // Stop delegate delivery first, then close.
                 let _ = ch.setDelegate(None);
                 let ret = ch.closeChannel();
                 tracing::debug!(ret, "closed RFCOMM channel");
@@ -409,11 +389,9 @@ impl AsyncWrite for RfcommStream {
     }
 }
 
-/// Open the Maestro RFCOMM channel to the buds. Must be called on the MAIN
-/// thread with a running runloop: IOBluetooth's first use and its XPC
-/// handshake with bluetoothd are not safe when the main thread is blocked
-/// elsewhere. All outcomes (success and failure) are reported as StreamEvents
-/// through `tx`.
+/// Must be called on the main thread with a running runloop: IOBluetooth's
+/// first use and its XPC handshake with bluetoothd are not safe when the main
+/// thread is blocked elsewhere.
 pub fn open_maestro_channel(tx: &UnboundedSender<StreamEvent>) {
     let res = autoreleasepool(|_| unsafe {
         (|| -> Result<()> {
@@ -459,8 +437,6 @@ pub fn open_maestro_channel(tx: &UnboundedSender<StreamEvent>) {
     }
 }
 
-/// Open the Maestro RFCOMM channel, then pump the main runloop forever
-/// (used by the CLI commands, which have no AppKit runloop).
 pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
     open_maestro_channel(&tx);
 
@@ -475,7 +451,6 @@ pub fn run_bt_main(tx: UnboundedSender<StreamEvent>) -> ! {
     }
 }
 
-/// Waits for the channel open events and builds the stream.
 pub async fn wait_for_open(mut rx: UnboundedReceiver<StreamEvent>) -> Result<RfcommStream> {
     let open = async {
         let opened = loop {

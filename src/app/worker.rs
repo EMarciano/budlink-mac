@@ -1,6 +1,3 @@
-//! Connection worker: owns the Maestro session lifecycle on a tokio runtime,
-//! mirroring budlink's device.rs session/serve structure.
-
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
@@ -23,20 +20,13 @@ pub enum UiCommand {
     Reconnect,
 }
 
-/// Why a session ended.
 enum SessionEnd {
-    /// User asked to quit (command channel closed).
     Quit,
-    /// User asked to reconnect now.
     Reconnect,
 }
 
-/// Failed connection attempts before the supervisor gives up and idles
-/// (clicking Reconnect starts a fresh burst).
 const MAX_ATTEMPTS: u32 = 5;
 
-/// Connection supervisor: tries to connect up to MAX_ATTEMPTS times, then
-/// idles until the user clicks Reconnect (which starts a fresh burst).
 pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
     let mut attempts = 0u32;
     loop {
@@ -73,29 +63,23 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                         s.anc = None;
                         s.error = Some("not found — click Reconnect".to_string());
                     });
-                    // Idle until the user asks for a fresh burst (or quits).
                     match cmd_rx.recv().await {
                         Some(UiCommand::Reconnect) => {
                             attempts = 0;
                             continue;
                         }
-                        Some(UiCommand::SetAnc(_)) => continue, // retry the burst
+                        Some(UiCommand::SetAnc(_)) => continue,
                         None => return,
                     }
                 }
 
                 ui.update(|s| {
                     s.connected = false;
-                    // A pending open just means the buds are not linked to this
-                    // Mac right now — keep the quiet "connecting" state.
                     s.connecting = waiting;
                     s.anc = None;
                     s.error = if waiting { None } else { Some(short_error(&e)) };
                 });
 
-                // Auto-retry, faster when we're just waiting for the buds to
-                // link (pending open) vs. a real protocol error; or
-                // immediately on Reconnect.
                 let delay = if waiting {
                     Duration::from_secs(3)
                 } else {
@@ -107,7 +91,7 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
                             attempts = 0;
                             continue;
                         }
-                        Some(UiCommand::SetAnc(_)) => continue, // retry anyway
+                        Some(UiCommand::SetAnc(_)) => continue,
                         None => return,
                     },
                     _ = tokio::time::sleep(delay) => continue,
@@ -117,8 +101,6 @@ pub async fn worker(mut cmd_rx: UnboundedReceiver<UiCommand>, ui: UiHandle) {
     }
 }
 
-/// Menu-friendly one-liner for a session error; technical detail stays in
-/// the logs (RUST_LOG).
 fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
     if s.contains("no paired Pixel Buds")
@@ -163,7 +145,6 @@ async fn session(
     }
 }
 
-/// Pushes device state to the UI and applies UI commands until something fails.
 async fn serve(
     mut service: MaestroService,
     cmd_rx: &mut UnboundedReceiver<UiCommand>,
@@ -201,7 +182,6 @@ async fn serve(
                         tracing::warn!(error = ?err, ?state, "buds rejected ANC mode");
                         ui.update(|s| {
                             s.rejected_modes.push(state);
-                            // Optimistic checkmark must be rolled back.
                         });
                         let current = service
                             .read_setting(id::CurrentAncrState)

@@ -1,5 +1,3 @@
-//! Command-line interface: argument parsing and the run harness.
-
 mod agent;
 mod client;
 pub mod commands;
@@ -28,8 +26,6 @@ usage:
   budlink-mac agent-status     show agent installation state
 ";
 
-/// Parses argv and runs the selected command, or `None` if the arguments
-/// select the menu bar app instead.
 pub fn run() -> Option<ExitCode> {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "help".into());
     let exit = match cmd.as_str() {
@@ -81,8 +77,6 @@ fn report(res: Result<()>) -> ExitCode {
     }
 }
 
-/// Runs a command future on a worker-thread tokio runtime while the main
-/// thread performs all IOBluetooth work and pumps its runloop.
 fn run_cmd<F, Fut>(f: F) -> ExitCode
 where
     F: FnOnce(UnboundedReceiver<StreamEvent>) -> Fut + Send + 'static,
@@ -110,5 +104,5 @@ where
         })
         .expect("failed to spawn tokio thread");
 
-    bt::run_bt_main(tx); // never returns
+    bt::run_bt_main(tx);
 }

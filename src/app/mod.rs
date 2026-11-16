@@ -1,5 +1,3 @@
-//! Menu bar application: AppKit status item + connection worker.
-
 mod single_instance;
 mod ui;
 mod worker;
@@ -10,8 +8,6 @@ use std::sync::{Arc, Mutex};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
-/// Runs the menu bar app: AppKit on the main thread, tokio worker for the
-/// protocol. Never returns until the user quits.
 pub fn run() -> ExitCode {
     let _guard = match single_instance::SingleInstance::acquire() {
         Ok(g) => g,
@@ -31,7 +27,7 @@ pub fn run() -> ExitCode {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<worker::UiCommand>();
 
     let controller = ui::UiController::new(mtm, cmd_tx, state.clone(), open_slot.clone());
-    let handle = ui::UiHandle::new(controller, state, open_slot); // Retained keeps it alive
+    let handle = ui::UiHandle::new(controller, state, open_slot);
 
     std::thread::Builder::new()
         .name("tokio".into())

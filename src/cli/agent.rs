@@ -1,11 +1,3 @@
-//! LaunchAgent management: run the menu bar app automatically (at login and
-//! after crashes) via launchd, for any macOS user, without root.
-//!
-//! Layout (all in the current user's home):
-//! - binary:  ~/.local/bin/budlink-mac   (copied from the running exe)
-//! - plist:   ~/Library/LaunchAgents/<label>.plist
-//! - logs:    ~/Library/Logs/budlink-mac.log
-
 use std::path::PathBuf;
 
 use anyhow::{bail, Context as _, Result};
@@ -65,7 +57,6 @@ fn plist(binary: &std::path::Path, log: &std::path::Path) -> String {
     )
 }
 
-/// Copies the running binary to a stable location and (re)loads the agent.
 pub fn install() -> Result<()> {
     let src = std::env::current_exe().context("cannot locate current executable")?;
     let dir = bin_dir()?;
@@ -82,7 +73,6 @@ pub fn install() -> Result<()> {
         std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Remove quarantine attr if the source was ever downloaded/expanded.
     let _ = std::process::Command::new("xattr")
         .args(["-d", "com.apple.quarantine"])
         .arg(&dst)

@@ -1,7 +1,5 @@
-//! Single-instance guard for the menu bar app: an advisory flock on a pidfile
-//! in `~/Library/Application Support/budlink-mac/` (or `$TMPDIR` when HOME is
-//! unavailable). The lock is released by the OS when the process dies, so a
-//! crashed instance never blocks a new one.
+//! Advisory flock guard: the OS releases the lock automatically if the process
+//! crashes, so a crashed instance never blocks a new one.
 
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
@@ -16,7 +14,6 @@ pub struct SingleInstance {
 }
 
 impl SingleInstance {
-    /// Acquires the exclusive lock, or fails if another instance holds it.
     pub fn acquire() -> Result<Self> {
         let dir = lock_dir()?;
         std::fs::create_dir_all(&dir)
@@ -54,9 +51,6 @@ impl SingleInstance {
     }
 }
 
-/// `~/Library/Application Support/budlink-mac`, falling back to a per-user
-/// temp dir so the lock works on any machine (and any macOS user) out of the
-/// box.
 fn lock_dir() -> Result<std::path::PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         return Ok(format!("{home}/Library/Application Support/{APP_DIR}").into());

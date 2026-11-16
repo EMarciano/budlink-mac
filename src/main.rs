@@ -1,10 +1,3 @@
-//! budlink-mac — control Google Pixel Buds from macOS.
-//!
-//! Module layout:
-//! - [`bt`]: macOS IOBluetooth ↔ tokio bridge (shared transport)
-//! - [`cli`]: one-shot commands (list / probe / status / anc / settings)
-//! - [`app`]: menu bar application (AppKit + connection worker)
-
 mod app;
 mod bt;
 mod cli;
