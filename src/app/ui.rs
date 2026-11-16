@@ -1,6 +1,3 @@
-//! AppKit menu bar UI: status item, menu, and the main-thread glue between
-//! the tokio worker (protocol) and AppKit.
-
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
@@ -57,7 +54,6 @@ pub struct Ivars {
     left_item: Retained<NSMenuItem>,
     right_item: Retained<NSMenuItem>,
     case_item: Retained<NSMenuItem>,
-    /// Off, Active, Aware, Adaptive — order matches tags 1..=4.
     mode_items: Vec<Retained<NSMenuItem>>,
     reconnect_item: Retained<NSMenuItem>,
     quit_item: Retained<NSMenuItem>,
@@ -115,14 +111,12 @@ define_class!(
 );
 
 impl UiController {
-    /// Builds the status item and menu. Must be called on the main thread.
     pub fn new(
         mtm: MainThreadMarker,
         cmd_tx: UnboundedSender<UiCommand>,
         state: Arc<Mutex<UiState>>,
         open_slot: Arc<Mutex<Option<UnboundedSender<StreamEvent>>>>,
     ) -> Retained<Self> {
-        // Status item
         let status_item =
             NSStatusBar::systemStatusBar().statusItemWithLength(-1.0 /* NSVariableStatusItemLength */);
         if let Some(button) = status_item.button(mtm) {
@@ -136,7 +130,6 @@ impl UiController {
             button.setTitle(NSString::from_str("…").as_ref());
         }
 
-        // Menu
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
 
@@ -202,7 +195,6 @@ impl UiController {
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
 
-        // Wire targets now that the controller exists.
         unsafe {
             let target: &AnyObject = &*(Retained::as_ptr(&this) as *const AnyObject);
             for item in &this.ivars().mode_items {
@@ -218,7 +210,6 @@ impl UiController {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let ivars = self.ivars();
 
-        // Header
         let header = if state.connected {
             match &state.error {
                 Some(e) => format!("Pixel Buds — {e}"),
@@ -234,7 +225,6 @@ impl UiController {
         };
         ivars.header_item.setTitle(NSString::from_str(&header).as_ref());
 
-        // Battery lines
         let fmt = |label: &str, b: Option<Batt>| match b {
             Some(b) => format!("{label}: {b}"),
             None => format!("{label}: —"),
@@ -249,7 +239,6 @@ impl UiController {
             .case_item
             .setTitle(NSString::from_str(&fmt("Case", state.case)).as_ref());
 
-        // Status bar title
         if let Some(button) = ivars.status_item.button(mtm) {
             let title = if state.connected {
                 match (state.left, state.right) {
@@ -264,7 +253,6 @@ impl UiController {
             button.setTitle(NSString::from_str(&title).as_ref());
         }
 
-        // Mode checkmarks + availability
         for item in &ivars.mode_items {
             let tag_state = match item.tag() {
                 1 => Some(AncState::Off),
@@ -287,14 +275,6 @@ impl UiController {
     }
 }
 
-/// Worker-thread handle to the UI: updates shared state and asks the main
-/// thread to re-apply it / open the Bluetooth channel.
-///
-/// The controller is created and leaked on the main thread for the app's
-/// lifetime; the worker only ever messages it via
-/// `performSelectorOnMainThread` (which AppKit serializes onto the main
-/// thread), so holding a typed `Retained` here instead of a raw pointer is
-/// sound and lets the borrow checker check the rest of the code.
 #[derive(Clone)]
 pub struct UiHandle {
     ctrl: MainThreadOnly<UiController>,
@@ -302,9 +282,10 @@ pub struct UiHandle {
     open_slot: Arc<Mutex<Option<UnboundedSender<StreamEvent>>>>,
 }
 
-/// Wraps a main-thread object so it can be held (not called) from the worker.
-/// All access goes through `UiHandle::call_main`, which hops to the main
-/// thread before touching the object.
+/// Wraps a main-thread object so the worker can hold a `Retained` reference.
+/// Sound to `Send` because the worker never touches the object directly and
+/// only messages it via `performSelectorOnMainThread`, which AppKit serializes
+/// onto the main thread.
 struct MainThreadOnly<T: objc2::Message>(Retained<T>);
 unsafe impl<T: objc2::Message> Send for MainThreadOnly<T> {}
 impl<T: objc2::Message> Clone for MainThreadOnly<T> {
@@ -339,7 +320,6 @@ impl UiHandle {
         self.call_main(sel!(applyPendingState));
     }
 
-    /// Ask the main thread to open the Maestro channel; events go to `tx`.
     pub fn open_channel(&self, tx: UnboundedSender<StreamEvent>) {
         *self.open_slot.lock().unwrap() = Some(tx);
         self.call_main(sel!(openChannel));

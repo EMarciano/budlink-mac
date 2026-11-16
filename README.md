@@ -1,121 +1,58 @@
 # budlink-mac
 
-Control Google Pixel Buds (tested: Pixel Buds 2a) from macOS — a port-in-progress
-of [budlink](https://github.com/neptunonet/budlink) (Linux, GTK4) to macOS.
+macOS menu bar app and CLI to monitor battery levels and control noise cancellation on Google Pixel Buds.
 
-Like the original, it talks to the buds over Google's Maestro protocol using
-[`libmaestro`](https://github.com/qzed/pbpctrl) by Maximilian Luz, but replaces
-the BlueZ RFCOMM transport with macOS's IOBluetooth framework.
+A macOS port of [budlink](https://github.com/neptunonet/budlink), using Maximilian Luz's [`maestro`](https://github.com/qzed/pbpctrl) crate over macOS `IOBluetooth` RFCOMM instead of Linux BlueZ. Tested on Pixel Buds 2a; other Maestro-based Pixel Buds (such as Pixel Buds Pro / Pro 2) should also work.
 
-> Status: early development. Not affiliated with or endorsed by Google.
+## Build & Install
 
-## Usage
+Requires Rust and `protoc` (for `maestro`'s protobuf codegen):
 
-```
-cargo run -- menubar      # menu bar app: battery icon + noise control menu
-cargo run -- list         # list paired Bluetooth devices
-cargo run -- probe        # dump the buds' SDP services (finds the Maestro channel)
-cargo run -- status       # battery levels, placement, and noise control mode
-cargo run -- anc <mode>   # set noise control: off | active | aware | adaptive
+```sh
+brew install protobuf
+cargo build --release
 ```
 
-The menu bar app shows an earbuds icon with per-bud battery levels, a battery
-breakdown, and a checkmarked noise-control menu (Off / ANC / Transparency /
-Adaptive). It follows changes made on the buds themselves (touch-and-hold),
-greys out modes the buds reject, and reconnects automatically when the buds
-leave and return.
+Pair your Pixel Buds in **System Settings → Bluetooth** first, and grant Bluetooth access when macOS prompts for it.
 
-### Run at login (launchd agent)
+### Run at login (menu bar app)
 
-```
-cargo run --release -- install-agent      # install binary to ~/.local/bin + start
-budlink-mac agent-status                  # check state
-budlink-mac uninstall-agent               # remove
+```sh
+cargo run --release -- install-agent   # installs to ~/.local/bin/budlink-mac and starts via launchd
+budlink-mac agent-status               # check LaunchAgent state
+budlink-mac uninstall-agent            # stop and remove
 ```
 
-This installs a per-user LaunchAgent
-(`~/Library/LaunchAgents/io.github.emarciano.budlink-mac.plist`) that starts
-the menu bar app at login and restarts it on crash — so whenever the buds
-connect to the Mac, the app picks them up within a few seconds. No root, no
-machine-specific paths; logs go to `~/Library/Logs/budlink-mac.log`.
+`install-agent` sets up a per-user LaunchAgent (`~/Library/LaunchAgents/budlink-mac.plist`, logs at `~/Library/Logs/budlink-mac.log`) that starts at login, reconnects automatically when the buds come in range, syncs on-bud touch-and-hold changes, and disables modes rejected by your model.
 
-Pair and connect the buds in macOS Bluetooth settings first. The buds reject
-noise-control changes (`FailedPrecondition`) unless they detect that they are
-in your ears, and they report an undefined noise mode (raw 0) while unworn.
-Case battery is only reported while at least one bud sits in the case (the
-case has no Bluetooth radio of its own). The Pixel Buds 2a have no Adaptive
-mode — requesting it is rejected by the buds (`Unknown` status), same as on
-the original Linux app.
+## CLI Usage
 
-### Is the missing Adaptive mode a hardware or software limitation?
+```sh
+budlink-mac menubar      # run the menu bar app in the foreground
+budlink-mac status       # battery levels, placement, and current noise control mode
+budlink-mac anc <mode>   # set noise control: off | active | aware | adaptive
+budlink-mac list         # list paired Bluetooth devices
+budlink-mac probe        # list SDP services on the buds
+budlink-mac settings     # dump firmware versions and ANC settings
+```
 
-Investigated on 2026-11-05. Verdict: **firmware feature-gating (software),
-not a documented hardware limitation.** Device-side evidence (see
-`budlink-mac settings` and the hidden `x-gesture-adaptive` experiment):
+Set `RUST_LOG=budlink_mac=debug` for verbose logging.
 
-- The 2a run firmware `release_4.467` — the same version that *delivered*
-  Adaptive Audio to the Pixel Buds Pro 2 as a post-launch software update,
-  proving the feature is firmware/DSP, not launch silicon.
-- The 2a's settings schema accepts Adaptive: writing a gesture loop of
-  `[active, aware, adaptive]` succeeds and reads back — only activating the
-  mode (`CurrentAncrState = Adaptive`) is rejected (`Unknown`).
-- Google's own docs attribute Adaptive Audio processing to the Tensor A1
-  chip, which both models share.
+## Device Notes
 
-Caveat: the 2a does have reduced ANC hardware (2 mics/bud vs 3, no
-voice/motion sensors, "Silent Seal 1.5" vs 2.0), so a hardware-*quality*
-rationale is conceivable — but no Google doc, teardown, or reviewer claims
-Adaptive depends on those parts, and Google has never stated a rationale.
+- **In-ear detection**: The buds reject noise-control changes (`FailedPrecondition`) unless worn.
+- **Case battery**: Reported only while at least one bud is in the case (the case has no Bluetooth radio).
+- **Single control connection**: Pixel Buds accept one Maestro connection at a time; disconnect any phone Pixel Buds app if opening the channel times out.
+- **Adaptive mode on Pixel Buds 2a**: Firmware-gated (`CurrentAncrState = Adaptive` is rejected even though the gesture-loop setting accepts `adaptive`); the menu automatically greys out rejected modes.
 
-Set `RUST_LOG=budlink_mac=debug` for verbose logs.
+## How It Works
 
-## How it works
-
-- **Protocol**: Maestro runs over Bluetooth *Classic* RFCOMM (service
-  `MAESTRO APP`, UUID `25e97ff7-24ce-4c4c-8951-f764a708f7b5`, RFCOMM channel 1
-  on the Pixel Buds 2a), framed as HDLC + Pigweed RPC + protobuf. `libmaestro`
-  implements all of it; this crate only supplies a byte stream.
-- **Transport**: CoreBluetooth is BLE-only, so the RFCOMM channel is opened
-  with IOBluetooth (`IOBluetoothDevice.openRFCOMMChannelAsync`) via the
-  `objc2-io-bluetooth` bindings. Delegate callbacks
-  (`rfcommChannelData/OpenComplete/Closed`) feed a `tokio`
-  `AsyncRead + AsyncWrite` wrapper that libmaestro's codec consumes. Writes go
-  through `writeSync` chunked to the channel MTU.
-- **Threading**: all IOBluetooth calls happen on the **main thread**, which
-  then pumps its `NSRunLoop` forever (delegate callbacks are delivered there).
-  The tokio runtime runs on a worker thread. In the menu bar app the main
-  thread runs AppKit instead (`NSApplication.run()` pumps the same main
-  runloop), and the worker reaches the UI via a shared state snapshot plus
-  `performSelectorOnMainThread`; UI commands (mode changes, reconnect) travel
-  back over a tokio channel. Two pitfalls this avoids:
-  - IOBluetooth's XPC handshake with `bluetoothd` can deadlock if first used
-    from a background thread while the main thread is blocked.
-  - `-[NSRunLoop run]` on a bare thread returns immediately when no sources
-    are attached yet, so the loop uses `runMode:beforeDate:` instead.
-
-Notably, macOS happily opens the RFCOMM channel while the buds also carry
-A2DP/HFP audio — no extra privileges needed beyond the usual Bluetooth
-permission prompt. (USB-C on the buds is charge-only; there is no control
-channel over USB.)
-
-## Dependencies
-
-Build: Rust (2021 edition) and `protoc` (`brew install protobuf`) for
-libmaestro's protobuf codegen.
-
-## Roadmap
-
-- [x] Device discovery, SDP probe, RFCOMM open
-- [x] Battery levels (buds + case), placement info
-- [x] Noise control read/write (off / ANC / transparency / adaptive)
-- [x] Menu bar app (battery icon + noise control), like budlink's tray
-- [x] Follow device-side changes (touch-and-hold) via settings subscription
-- [x] Reconnect handling when the buds come and go
-- [ ] App bundle + codesigning (proper app name/icon, launch at login)
+- **Protocol**: Google's Maestro protocol runs over Bluetooth Classic RFCOMM (UUID `25e97ff7-24ce-4c4c-8951-f764a708f7b5`: HDLC + Pigweed RPC + protobuf), handled by [`maestro`](https://github.com/qzed/pbpctrl) alongside active A2DP/HFP audio.
+- **Transport**: Because macOS `CoreBluetooth` is BLE-only, `budlink-mac` opens the RFCOMM channel via `IOBluetooth` (`objc2-io-bluetooth`) and bridges delegate callbacks into a `tokio` `AsyncRead`/`AsyncWrite` stream.
+- **Threading**: `IOBluetooth` and AppKit run on the main thread's `NSRunLoop` (avoiding `bluetoothd` XPC initialization deadlocks), while `tokio` drives the RPC session on a worker thread.
 
 ## License
 
-GPL-3.0-or-later. libmaestro is MIT/Apache-2.0 by Maximilian Luz.
+[LGPL-3.0-or-later](LICENSE). Uses [`maestro`](https://github.com/qzed/pbpctrl) by Maximilian Luz (MIT/Apache-2.0) and is inspired by [budlink](https://github.com/neptunonet/budlink).
 
-## Notes
-The current project started as a learning session about Rust, Bluetooth and AI coding
+*Not affiliated with or endorsed by Google.*

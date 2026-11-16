@@ -1,5 +1,3 @@
-//! Shared Maestro client setup for CLI commands.
-
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -11,7 +9,6 @@ use maestro::pwrpc::Error as RpcError;
 
 use crate::bt::{self, StreamEvent};
 
-/// Opens the Maestro connection and starts the RPC client.
 pub async fn setup_client(
     rx: UnboundedReceiver<StreamEvent>,
 ) -> Result<(ClientHandle, u32, JoinHandle<Result<(), RpcError>>)> {

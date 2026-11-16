@@ -1,9 +1,3 @@
-//! CLI commands: one-shot operations against the buds, printing to stdout.
-//!
-//! Each command receives the receiver side of the Bluetooth event channel;
-//! the channel itself is opened on the main thread by the harness in
-//! [`crate::cli::run_cmd`].
-
 use anyhow::{bail, Result};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -97,7 +91,6 @@ pub async fn set_anc(rx: UnboundedReceiver<StreamEvent>, state: AncState) -> Res
         }
     }
 
-    // Confirm what the buds report back.
     match read_anc_state(&mut service).await {
         Ok(current) => println!("Noise control is now: {}", current.as_str()),
         Err(e) => println!("Set, but reading back the state failed: {e}"),
@@ -107,9 +100,8 @@ pub async fn set_anc(rx: UnboundedReceiver<StreamEvent>, state: AncState) -> Res
     Ok(())
 }
 
-/// One-off experiment: try enabling `adaptive` in the gesture loop, then
-/// restore the original configuration. Determines whether the 2a firmware
-/// gates Adaptive mode at the setting level or only at the state level.
+/// Checks whether 2a firmware gates Adaptive mode at the gesture-loop setting
+/// level or only on state changes.
 pub async fn gesture_adaptive_experiment(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
     let (handle, channel, client_task) = setup_client(rx).await?;
     let mut service = MaestroService::new(handle, channel);
@@ -132,7 +124,6 @@ pub async fn gesture_adaptive_experiment(rx: UnboundedReceiver<StreamEvent>) -> 
     }
 
     if res.is_ok() {
-        // Read back, then restore.
         match service.read_setting_var(SettingId::AncrGestureLoop).await? {
             SettingValue::AncrGestureLoop(l) => println!("read back: {l}"),
             other => println!("read back unexpected: {other:?}"),
