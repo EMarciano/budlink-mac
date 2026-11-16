@@ -12,11 +12,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, Message};
-use objc2_foundation::{NSRunLoop, NSObject};
+use objc2_foundation::{NSObject, NSRunLoop};
 use objc2_io_bluetooth::{
-    BluetoothClassOfDevice, BluetoothRFCOMMChannelID, IOBluetoothDevice,
-    IOBluetoothRFCOMMChannel, IOBluetoothRFCOMMChannelDelegate, IOBluetoothSDPDataElement,
-    IOBluetoothSDPServiceRecord, IOBluetoothSDPUUID,
+    BluetoothClassOfDevice, BluetoothRFCOMMChannelID, IOBluetoothDevice, IOBluetoothRFCOMMChannel,
+    IOBluetoothRFCOMMChannelDelegate, IOBluetoothSDPDataElement, IOBluetoothSDPServiceRecord,
+    IOBluetoothSDPUUID,
 };
 
 #[allow(non_camel_case_types)]
@@ -75,7 +75,11 @@ define_class!(
 
     unsafe impl IOBluetoothRFCOMMChannelDelegate for BtDelegate {
         #[unsafe(method(rfcommChannelOpenComplete:status:))]
-        unsafe fn open_complete(&self, _channel: Option<&IOBluetoothRFCOMMChannel>, status: IOReturn) {
+        unsafe fn open_complete(
+            &self,
+            _channel: Option<&IOBluetoothRFCOMMChannel>,
+            status: IOReturn,
+        ) {
             tracing::debug!(status, "rfcommChannelOpenComplete");
             let _ = self.ivars().tx.send(StreamEvent::OpenComplete(status));
         }
@@ -179,7 +183,10 @@ unsafe fn find_buds() -> Result<Retained<IOBluetoothDevice>> {
     Ok(dev)
 }
 
-unsafe fn element_uuids(el: &IOBluetoothSDPDataElement, out: &mut Vec<Retained<IOBluetoothSDPUUID>>) {
+unsafe fn element_uuids(
+    el: &IOBluetoothSDPDataElement,
+    out: &mut Vec<Retained<IOBluetoothSDPUUID>>,
+) {
     unsafe {
         if let Some(u) = el.getUUIDValue() {
             out.push(u);
@@ -198,7 +205,8 @@ unsafe fn record_uuids(rec: &IOBluetoothSDPServiceRecord) -> Vec<Retained<IOBlue
     let mut out = Vec::new();
     unsafe {
         for attr in rec.sortedAttributes().iter() {
-            let Some(attr) = attr.downcast_ref::<objc2_io_bluetooth::IOBluetoothSDPServiceAttribute>()
+            let Some(attr) =
+                attr.downcast_ref::<objc2_io_bluetooth::IOBluetoothSDPServiceAttribute>()
             else {
                 continue;
             };
@@ -250,7 +258,10 @@ unsafe fn find_maestro_channel(dev: &IOBluetoothDevice) -> Result<BluetoothRFCOM
         return Ok(channel_id);
     }
 
-    bail!("Maestro service (uuid {}) not found in SDP records", maestro::UUID)
+    bail!(
+        "Maestro service (uuid {}) not found in SDP records",
+        maestro::UUID
+    )
 }
 
 pub fn probe() -> Result<()> {
@@ -259,7 +270,9 @@ pub fn probe() -> Result<()> {
         println!(
             "device: {} ({})",
             dev.name(),
-            dev.addressString().map(|s| s.to_string()).unwrap_or_default()
+            dev.addressString()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
         );
         let ret = dev.performSDPQuery(None);
         if ret != 0 {
@@ -281,12 +294,15 @@ pub fn probe() -> Result<()> {
             let rfcomm = rec.getRFCOMMChannelID(&mut ch) == 0;
             println!(
                 "  service: {svc_name:40} rfcomm={} maestro={is_maestro}",
-                if rfcomm { format!("ch{ch}") } else { "-".into() }
+                if rfcomm {
+                    format!("ch{ch}")
+                } else {
+                    "-".into()
+                }
             );
             for u in record_uuids(rec) {
-                let desc: Retained<objc2_foundation::NSString> =
-                    msg_send![&*u, description];
-                println!("      uuid: {}", desc.to_string());
+                let desc: Retained<objc2_foundation::NSString> = msg_send![&*u, description];
+                println!("      uuid: {desc}");
             }
         }
         Ok(())
@@ -372,10 +388,9 @@ impl AsyncWrite for RfcommStream {
         };
         if ret != 0 {
             tracing::warn!(ret, "rfcomm writeSync failed");
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("rfcomm write failed (IOReturn {ret})"),
-            )));
+            return Poll::Ready(Err(io::Error::other(format!(
+                "rfcomm write failed (IOReturn {ret})"
+            ))));
         }
         Poll::Ready(Ok(n))
     }
@@ -423,7 +438,7 @@ pub fn open_maestro_channel(tx: &UnboundedSender<StreamEvent>) {
             };
             // The delegate must live as long as the runloop delivers callbacks.
             std::mem::forget(delegate);
-            let failed = matches!(opened, Err(_));
+            let failed = opened.is_err();
             let _ = tx.send(StreamEvent::OpenResult(opened));
             if failed {
                 bail!("openRFCOMMChannelAsync failed (IOReturn {ret})");

@@ -117,8 +117,8 @@ impl UiController {
         state: Arc<Mutex<UiState>>,
         open_slot: Arc<Mutex<Option<UnboundedSender<StreamEvent>>>>,
     ) -> Retained<Self> {
-        let status_item =
-            NSStatusBar::systemStatusBar().statusItemWithLength(-1.0 /* NSVariableStatusItemLength */);
+        let status_item = NSStatusBar::systemStatusBar()
+            .statusItemWithLength(-1.0 /* NSVariableStatusItemLength */);
         if let Some(button) = status_item.button(mtm) {
             let symbol = NSString::from_str("earbuds");
             if let Some(image) =
@@ -207,7 +207,9 @@ impl UiController {
     }
 
     fn apply_state(&self, state: &UiState) {
-        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
         let ivars = self.ivars();
 
         let header = if state.connected {
@@ -223,7 +225,9 @@ impl UiController {
                 None => "Pixel Buds — not connected".to_string(),
             }
         };
-        ivars.header_item.setTitle(NSString::from_str(&header).as_ref());
+        ivars
+            .header_item
+            .setTitle(NSString::from_str(&header).as_ref());
 
         let fmt = |label: &str, b: Option<Batt>| match b {
             Some(b) => format!("{label}: {b}"),

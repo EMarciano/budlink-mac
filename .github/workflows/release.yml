@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: command -v protoc >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install protobuf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package archive
+        run: |
+          ARCHIVE="budlink-mac-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          mkdir -p stage dist
+          cp "target/${{ matrix.target }}/release/budlink-mac" README.md LICENSE stage/
+          tar -C stage -czf "dist/${ARCHIVE}" budlink-mac README.md LICENSE
+          (cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

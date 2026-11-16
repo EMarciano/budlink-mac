@@ -94,7 +94,10 @@ pub fn install() -> Result<()> {
         .output()
         .context("failed to run launchctl")?;
     if !out.status.success() {
-        bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "launchctl bootstrap failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     println!("Installed and started.");
@@ -124,11 +127,25 @@ pub fn uninstall() -> Result<()> {
 
 pub fn print_status() -> Result<()> {
     let plist_file = plist_path()?;
-    println!("plist:    {} ({})", plist_file.display(),
-        if plist_file.exists() { "installed" } else { "not installed" });
+    println!(
+        "plist:    {} ({})",
+        plist_file.display(),
+        if plist_file.exists() {
+            "installed"
+        } else {
+            "not installed"
+        }
+    );
     let dst = bin_dir()?.join(BIN_NAME);
-    println!("binary:   {} ({})", dst.display(),
-        if dst.exists() { "installed" } else { "not installed" });
+    println!(
+        "binary:   {} ({})",
+        dst.display(),
+        if dst.exists() {
+            "installed"
+        } else {
+            "not installed"
+        }
+    );
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     let out = std::process::Command::new("launchctl")
         .args(["print", &format!("{domain}/{LABEL}")])
@@ -137,7 +154,10 @@ pub fn print_status() -> Result<()> {
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
             let t = line.trim();
-            if t.starts_with("state =") || t.starts_with("pid =") || t.starts_with("last exit code =") {
+            if t.starts_with("state =")
+                || t.starts_with("pid =")
+                || t.starts_with("last exit code =")
+            {
                 println!("{t}");
             }
         }
