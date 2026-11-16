@@ -18,7 +18,11 @@ pub async fn status(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
     print_battery(&info);
 
     match read_anc_state(&mut service).await {
-        Ok(state) => println!("Noise control: {} (raw {})", state.as_str(), i32::from(state)),
+        Ok(state) => println!(
+            "Noise control: {} (raw {})",
+            state.as_str(),
+            i32::from(state)
+        ),
         Err(e) => println!("Noise control: unreadable ({e})"),
     }
 
@@ -33,11 +37,7 @@ pub async fn settings_dump(rx: UnboundedReceiver<StreamEvent>) -> Result<()> {
     match service.get_software_info().await {
         Ok(sw) => {
             if let Some(fw) = sw.firmware {
-                for (label, v) in [
-                    ("case ", fw.case),
-                    ("left ", fw.left),
-                    ("right", fw.right),
-                ] {
+                for (label, v) in [("case ", fw.case), ("left ", fw.left), ("right", fw.right)] {
                     match v {
                         Some(v) => println!("firmware {label}: {}", v.version_string),
                         None => println!("firmware {label}: unknown"),
@@ -187,7 +187,10 @@ fn print_battery(info: &RuntimeInfo) {
 }
 
 async fn read_anc_state(service: &mut MaestroService) -> Result<AncState> {
-    match service.read_setting_var(SettingId::CurrentAncrState).await? {
+    match service
+        .read_setting_var(SettingId::CurrentAncrState)
+        .await?
+    {
         SettingValue::CurrentAncrState(state) => Ok(state),
         other => bail!("unexpected settings value for ANC state: {other:?}"),
     }
